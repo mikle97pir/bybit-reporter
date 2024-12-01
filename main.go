@@ -262,7 +262,7 @@ func (c *BybitClient) handleMessage(ctx context.Context, message []byte, handled
 	}
 }
 
-func initDb() (*sql.DB, error) {
+func openDb() (*sql.DB, error) {
 	db, err := sql.Open("sqlite3", "trades.db")
 	if err != nil {
 		return nil, err
@@ -287,7 +287,23 @@ func initDb() (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	_, err = db.Exec("BEGIN TRANSACTION")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+func closeDb(db *sql.DB) {
+	_, err := db.Exec("END TRANSACTION")
+	if err != nil {
+		slog.Error("cannot close db", slog.Any("error", err))
+	}
+	err = db.Close()
+	if err != nil {
+		slog.Error("cannot close db", slog.Any("error", err))
+	}
 }
 
 func writeMessagesToDb(ctx context.Context, db *sql.DB, handledMessages chan BybitTradeMessage) {
@@ -327,18 +343,18 @@ func writeMessagesToDb(ctx context.Context, db *sql.DB, handledMessages chan Byb
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
 
 	ctx := context.Background()
 
-	db, err := initDb()
+	db, err := openDb()
 	if err != nil {
 		slog.Error("cannot init db", slog.Any("error", err))
 		os.Exit(1)
 	}
-	defer db.Close()
+	defer closeDb(db)
 
 	c, err := NewBybitClient(
 		"wss://stream.bybit.com",
