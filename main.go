@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -255,10 +257,15 @@ func (c *BybitClient) handleMessage(ctx context.Context, message []byte, handled
 		var parsedMessage BybitTradeMessage
 		err := json.Unmarshal(message, &parsedMessage)
 		if err != nil {
-			slog.Error("Cannot parse message", slog.String("body", messageStr))
+			slog.Error("cannot parse message", slog.String("body", messageStr))
 		}
 		slog.Debug("message", slog.Any("body", parsedMessage))
-		handledMessages <- parsedMessage
+		select {
+		case <-ctx.Done():
+			slog.Debug("message handling canceled")
+			return
+		case handledMessages <- parsedMessage:
+		}
 	}
 }
 
@@ -297,12 +304,13 @@ func openDb() (*sql.DB, error) {
 
 func closeDb(db *sql.DB) {
 	_, err := db.Exec("END TRANSACTION")
+	slog.Info("ending transaction")
 	if err != nil {
-		slog.Error("cannot close db", slog.Any("error", err))
+		slog.Error("cannot close db", slog.Any("err", err))
 	}
 	err = db.Close()
 	if err != nil {
-		slog.Error("cannot close db", slog.Any("error", err))
+		slog.Error("cannot close db", slog.Any("err", err))
 	}
 }
 
@@ -347,11 +355,12 @@ func main() {
 	}))
 	slog.SetDefault(logger)
 
-	ctx := context.Background()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	db, err := openDb()
 	if err != nil {
-		slog.Error("cannot init db", slog.Any("error", err))
+		slog.Error("cannot init db", slog.Any("err", err))
 		os.Exit(1)
 	}
 	defer closeDb(db)
@@ -363,13 +372,13 @@ func main() {
 		20*time.Second,
 	)
 	if err != nil {
-		slog.Error("cannot create bybit client", slog.Any("error", err))
+		slog.Error("cannot create bybit client", slog.Any("err", err))
 		os.Exit(1)
 	}
 
 	tickers, err := c.GetTickers(ctx)
 	if err != nil {
-		slog.Error("cannot get tickers", slog.Any("error", err))
+		slog.Error("cannot get tickers", slog.Any("err", err))
 	}
 
 	instruments := c.TickersToInstruments(tickers)
@@ -381,7 +390,7 @@ func main() {
 
 	cancelWs, err := c.startListening(ctx, errors, messages)
 	if err != nil {
-		slog.Error("cannot start ws", slog.Any("error", err))
+		slog.Error("cannot start ws", slog.Any("err", err))
 	}
 
 	handledMessages := make(chan BybitTradeMessage)
@@ -389,10 +398,13 @@ func main() {
 
 	for {
 		select {
+		case <-ctx.Done():
+			slog.Info("execution interrupted")
+			return
 		case message := <-messages:
 			go c.handleMessage(ctx, message, handledMessages)
 		case err := <-errors:
-			slog.Error("error", slog.Any("error", err))
+			slog.Error("err", slog.Any("err", err))
 			cancelWs()
 
 			slog.Info("waiting before redialing")
@@ -401,7 +413,7 @@ func main() {
 			slog.Info("redialing")
 			cancelWs, err = c.startListening(ctx, errors, messages)
 			if err != nil {
-				slog.Error("cannot start ws", slog.Any("error", err))
+				slog.Error("cannot start ws", slog.Any("err", err))
 			}
 		}
 	}
