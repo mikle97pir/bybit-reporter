@@ -166,6 +166,7 @@ func (c *BybitClient) listen(ctx context.Context, errors chan error, messages ch
 				default:
 					slog.Debug("cannot send listening error, channel is full")
 				}
+				continue
 			}
 			slog.Debug("received message")
 			messages <- message
@@ -188,8 +189,9 @@ func (c *BybitClient) ping(ctx context.Context, errors chan error) {
 				default:
 					slog.Debug("cannot send ping error, channel is full")
 				}
+			} else {
+				slog.Info("sent ping succesfully")
 			}
-			slog.Info("sent ping")
 			time.Sleep(c.pingInterval)
 		}
 	}
@@ -258,6 +260,7 @@ func (c *BybitClient) handleMessage(ctx context.Context, message []byte, handled
 		err := json.Unmarshal(message, &parsedMessage)
 		if err != nil {
 			slog.Error("cannot parse message", slog.String("body", messageStr))
+			return
 		}
 		slog.Debug("message", slog.Any("body", parsedMessage))
 		select {
@@ -324,8 +327,7 @@ func writeMessagesToDb(ctx context.Context, db *sql.DB, handledMessages chan Byb
 		case <-ctx.Done():
 			slog.Debug("writing to db canceled")
 			return
-		default:
-			message := <-handledMessages
+		case message := <-handledMessages:
 			for _, trade := range message.Data {
 				_, err := db.Exec(
 					insert,
@@ -351,7 +353,7 @@ func writeMessagesToDb(ctx context.Context, db *sql.DB, handledMessages chan Byb
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
 
