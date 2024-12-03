@@ -166,7 +166,7 @@ func (c *BybitClient) listen(ctx context.Context, errors chan error, messages ch
 				default:
 					slog.Debug("cannot send listening error, channel is full")
 				}
-				continue
+				return
 			}
 			slog.Debug("received message")
 			messages <- message
@@ -189,9 +189,9 @@ func (c *BybitClient) ping(ctx context.Context, errors chan error) {
 				default:
 					slog.Debug("cannot send ping error, channel is full")
 				}
-			} else {
-				slog.Info("sent ping succesfully")
+				return
 			}
+			slog.Info("sent ping succesfully")
 			time.Sleep(c.pingInterval)
 		}
 	}
@@ -344,8 +344,9 @@ func writeMessagesToDb(ctx context.Context, db *sql.DB, handledMessages chan Byb
 				)
 				if err != nil {
 					slog.Error("cannot write to db", slog.Any("body", message))
+				} else {
+					slog.Debug("inserted trade")
 				}
-				slog.Debug("inserted trade")
 			}
 		}
 	}
@@ -353,7 +354,7 @@ func writeMessagesToDb(ctx context.Context, db *sql.DB, handledMessages chan Byb
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
 
