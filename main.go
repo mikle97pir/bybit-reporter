@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	_ "github.com/marcboeker/go-duckdb"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -273,12 +274,12 @@ func (c *BybitClient) handleMessage(ctx context.Context, message []byte, handled
 }
 
 func openDb() (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", "trades.db")
+	db, err := sql.Open("sqlite3", "trades_cache.db")
 	if err != nil {
 		return nil, err
 	}
 	createTable := `
-	CREATE TABLE IF NOT EXISTS BybitTrade (
+	CREATE TABLE BybitTrade (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		written_ts DATETIME DEFAULT CURRENT_TIMESTAMP,
 		topic TEXT NOT NULL,
@@ -317,10 +318,12 @@ func closeDb(db *sql.DB) {
 	}
 }
 
-func writeMessagesToDb(ctx context.Context, db *sql.DB, handledMessages chan BybitTradeMessage) {
+func writeMessagesToDb(ctx context.Context, db *sql.DB, duck *sql.DB, flushDelay time.Duration, handledMessages chan BybitTradeMessage) {
 	insert := `
 	INSERT INTO BybitTrade (topic, message_ts, message_type, trade_id, trade_ts, price, size, side, symbol, is_block)
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+
+	lastFlush := time.Now()
 
 	for {
 		select {
@@ -329,6 +332,7 @@ func writeMessagesToDb(ctx context.Context, db *sql.DB, handledMessages chan Byb
 			return
 		case message := <-handledMessages:
 			for _, trade := range message.Data {
+
 				_, err := db.Exec(
 					insert,
 					message.Topic,
@@ -347,14 +351,68 @@ func writeMessagesToDb(ctx context.Context, db *sql.DB, handledMessages chan Byb
 				} else {
 					slog.Debug("inserted trade")
 				}
+
+				if time.Since(lastFlush) > flushDelay {
+					slog.Info("starting to flush data from SQLite to DuckDB")
+					_, err = db.Exec("end transaction")
+					if err != nil {
+						slog.Error("cannot end transaction", slog.Any("err", err))
+					}
+					_, err = duck.Exec(
+						"insert into BybitTrade select * from sqlite_scan('trades_cache.db', 'BybitTrade')",
+					)
+					if err != nil {
+						slog.Error("cannot flush data to DuckDB", slog.Any("err", err))
+					} else {
+						_, err = db.Exec("delete from BybitTrade")
+						if err != nil {
+							slog.Error("cannot truncate table in SQLite", slog.Any("err", err))
+						}
+					}
+					_, err = db.Exec("begin transaction")
+					if err != nil {
+						slog.Error("cannot begin new transaction", slog.Any("err", err))
+					}
+					lastFlush = time.Now()
+					slog.Info("finished flushing data from SQLite to DuckDB")
+				}
+
 			}
 		}
 	}
 }
 
+func openDuck() (*sql.DB, error) {
+	duck, err := sql.Open("duckdb", "trades.db")
+	if err != nil {
+		return nil, err
+	}
+	importTable := `
+	install sqlite;
+	load sqlite;
+	create table BybitTrade
+	as select * from sqlite_scan(
+		'trades_cache.db',
+		'BybitTrade'
+	)
+	`
+	_, err = duck.Exec(importTable)
+	if err != nil {
+		return nil, err
+	}
+	return duck, nil
+}
+
+func closeDuck(duck *sql.DB) {
+	err := duck.Close()
+	if err != nil {
+		slog.Error("cannot close db", slog.Any("err", err))
+	}
+}
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
 
@@ -367,6 +425,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer closeDb(db)
+
+	duck, err := openDuck()
+	if err != nil {
+		slog.Error("cannot init duckdb", slog.Any("err", err))
+	}
+	defer closeDuck(duck)
 
 	c, err := NewBybitClient(
 		"wss://stream.bybit.com",
@@ -397,7 +461,13 @@ func main() {
 	}
 
 	handledMessages := make(chan BybitTradeMessage)
-	go writeMessagesToDb(ctx, db, handledMessages)
+	go writeMessagesToDb(
+		ctx,
+		db,
+		duck,
+		5*time.Minute,
+		handledMessages,
+	)
 
 	for {
 		select {
