@@ -364,9 +364,18 @@ func writeMessagesToDb(ctx context.Context, db *sql.DB, duck *sql.DB, flushDelay
 					if err != nil {
 						slog.Error("cannot flush data to DuckDB", slog.Any("err", err))
 					} else {
+						_, err = duck.Exec("checkpoint")
+						if err != nil {
+							slog.Error("cannot checkpoint in DuckDB", slog.Any("err", err))
+						}
 						_, err = db.Exec("delete from BybitTrade")
 						if err != nil {
 							slog.Error("cannot truncate table in SQLite", slog.Any("err", err))
+						} else {
+							_, err = db.Exec("VACUUM")
+							if err != nil {
+								slog.Error("cannot vacuum SQLite", slog.Any("err", err))
+							}
 						}
 					}
 					_, err = db.Exec("begin transaction")
@@ -429,6 +438,7 @@ func main() {
 	duck, err := openDuck()
 	if err != nil {
 		slog.Error("cannot init duckdb", slog.Any("err", err))
+		os.Exit(1)
 	}
 	defer closeDuck(duck)
 
